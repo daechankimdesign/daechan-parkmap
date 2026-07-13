@@ -17,7 +17,7 @@ const CONFIG = {
     // (staticCenter / staticZoom + cover-scale, via computeHomeView) so the facade→live swap
     // doesn't reframe. To change the start view, edit staticCenter / staticZoom — not this.
     // defaultZoom is kept only as a fallback seed and is otherwise unused.
-    defaultZoom: 12,
+    defaultZoom: 12.5,
     minZoom: 3,   // farthest the user can zoom out (no smaller than 3)
     airtableProxy: "https://lively-dawn-3d84.adam-69d.workers.dev",
     // ↓ Change this when the domain changes — all slug links update automatically
@@ -48,7 +48,7 @@ const FILTER_PANEL_MAX_W = 480
 // sm POI detail panel = bottom sheet covering this fraction of the container height.
 // Used both for the sheet's height and for the map's bottom padding (so the selected
 // POI centers in the visible strip ABOVE the sheet). Keep the two in sync via this.
-const SM_SHEET_FRACTION = 0.75
+const SM_SHEET_FRACTION = 0.70
 
 type Breakpoint = "sm" | "lg"
 
@@ -82,29 +82,9 @@ const MIN_LOADING_MS = 2500
 // clock; it resumes after another quiet stretch. Suppressed while a POI detail / Filter /
 // Paths panel is open. Reuses the existing hover state so it's visually identical.
 const FEATURED_IDLE_MS = 20000
-// Each featured POI holds the spotlight for FEATURED_CYCLE_MS; the camera glides to it (centered,
-// zoom ~14) over FEATURED_FLY_MS, then holds for the remainder. Slow + eased to avoid motion sickness.
+// Each featured POI holds the spotlight for FEATURED_CYCLE_MS. The map does NOT move during the
+// rotation — an off-screen featured POI surfaces its edge label instead of the camera flying to it.
 const FEATURED_CYCLE_MS = 8000
-const FEATURED_FLY_MS = 4000
-// Card-hover fly: hovering a card whose dot is off-screen glides the map to center that dot over
-// this long. Quicker than the attract fly so it feels responsive to the hover, still smooth/eased.
-const HOVER_FLY_MS = 1600
-// Hover-intent: wait this long after the cursor settles on a card before flying, so a quick sweep
-// across cards never flies to each one (and can't leave the map centered on a card you left).
-const HOVER_FLY_INTENT_MS = 180
-// Hard floor for the card-hover move's mid-flight zoom-out. flyTo zooms OUT then back IN; rapid
-// hopping interrupts each fly mid-zoom-out, so without an absolute peak the view spirals outward.
-// minZoom is the flight's peak (most zoomed-out point) — pinning it here CAPS the dip so it can't
-// compound. Lower = a deeper but still-bounded pull-back; raise toward 14 for almost no dip.
-const HOVER_FLY_MIN_ZOOM = 13   // now the DEEPEST dip (only on long travels) and the hard cap
-// Distance-to-dip mapping (shared by every flyToCenterPOI): travel = screen-pixel distance from the
-// viewport center to the target dot. travel <= NEAR_PX -> almost no dip (FLY_NEAR_PEAK); >= FAR_PX ->
-// full dip (the caller's floor); linear between. Pixel-based so it adapts to any embed size.
-const FLY_NEAR_PX = 500
-const FLY_FAR_PX = 1400
-const FLY_NEAR_PEAK = 14
-// Smooth ease-in-out (sine) for the featured fly — gentle accel/decel, no jarring start or stop.
-const featuredEase = (t: number) => -(Math.cos(Math.PI * t) - 1) / 2
 // Delay before a dot hover is dropped on mouseleave. Absorbs the spurious leave→enter flutter
 // that source.setData (re-sorting the hovered dot on top) fires under a stationary cursor, so the
 // hover doesn't flicker. A genuine leave (no re-enter within the window) still clears normally.
@@ -189,30 +169,25 @@ function computeParseRanks(
     return ranks
 }
 
-// Zonal map control: gestures (wheel/drag/pinch) are live only outside the dead zones.
-// The top GESTURE_DEAD_TOP_VH and bottom GESTURE_DEAD_BOTTOM_VH of the map height let
-// those gestures fall through to the page (so it scrolls). 0 + 0.3 → no top dead zone,
-// bottom 30vh dead, top 70vh live. PLUS a GESTURE_DEAD_PAD_PX border all around the map
-// (top/bottom/left/right) so edge gestures fall through too.
-const GESTURE_DEAD_TOP_VH = 0
-const GESTURE_DEAD_BOTTOM_VH = 0.2
-const GESTURE_DEAD_PAD_PX = 20
-// Faint debug tint over the dead zone(s) while testing. Off for production.
-const SHOW_GESTURE_ZONE_DEBUG = false
+// (Gesture dead-zone / zonal-control system removed — the map is now fully interactive
+// everywhere. Gestures are enabled directly at map init; the carousel strip guards its own
+// area via its own pointerEvents, which goes non-interactive when there are no cards.)
 
 // TEMP/DEBUG: live zoom-level readout pinned to the top-center of the map. Off in all cases.
 // (liveZoom tracking is independent of this flag, so the Zoom Out button still works.)
 const SHOW_ZOOM_DEBUG = false
 
-// The "Zoom Out" button (under Filter) appears only once the live map is zoomed in PAST this
-// level, and animates in/out. Raise/lower to change when it shows.
-const ZOOM_OUT_MIN_ZOOM = 14
-
-// The "View whole necklace" button ALSO appears when the user zooms out BELOW this level
-// (further from the ~11.88 home view) — set just under home so the home view itself doesn't
-// trigger it. The button likewise appears when the necklace is panned entirely out of frame
-// (see the out-of-frame detector). No auto-snap — the user clicks the button to return.
-const VIEW_NECKLACE_BELOW_ZOOM = 11
+// The "View whole necklace" (Birdeye) button appears once the LIVE zoom strays more than
+// BIRDEYE_SHOW_DELTA levels from the CURRENT home framing (computeHomeView) in EITHER direction,
+// or when the necklace is panned entirely out of frame. Anchoring to the live home zoom (instead
+// of fixed 11/14) makes it behave the same on every aspect ratio: the home framing cover-scales to
+// ~12 on a wide desktop but ~11.3 on a tall portrait phone — a fixed floor put the phone right on
+// the trigger edge, so the button flickered/vanished at its own home view. Relative ±delta fixes
+// that. No auto-snap — the user taps the button to return home.
+const BIRDEYE_SHOW_DELTA = 1
+// HYSTERESIS: once shown, keep it until the zoom returns WELL inside home ± (DELTA − HYST), so a
+// tiny jiggle right at the ±DELTA edge can't flap it in/out (which would replay the intro reveal).
+const BIRDEYE_HIDE_HYST = 0.3
 
 // Result-count readout in the filter nav bar. Disabled per current design —
 // kept in code (not deleted) so it can be switched back on by flipping this.
@@ -537,6 +512,27 @@ function loadMapbox(): Promise<void> {
 }
 
 /* ============================================================
+   WEB FONTS — inject once so the component renders in its real
+   typefaces (Boldonse titles, IBM Plex body) in ANY host: Framer,
+   the dev harness, or a bare embed — instead of depending on the
+   host to have loaded them. Idempotent via the stylesheet link id.
+   ============================================================ */
+const FONTS_HREF =
+    "https://fonts.googleapis.com/css2?family=Boldonse&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@500;600;700&display=swap"
+function ensureFonts(): void {
+    if (typeof document === "undefined" || document.getElementById("enc-parkmap-fonts")) return
+    const preA = document.createElement("link")
+    preA.rel = "preconnect"; preA.href = "https://fonts.googleapis.com"
+    const preB = document.createElement("link")
+    preB.rel = "preconnect"; preB.href = "https://fonts.gstatic.com"; preB.crossOrigin = "anonymous"
+    const css = document.createElement("link")
+    css.id = "enc-parkmap-fonts"; css.rel = "stylesheet"; css.href = FONTS_HREF
+    document.head.appendChild(preA)
+    document.head.appendChild(preB)
+    document.head.appendChild(css)
+}
+
+/* ============================================================
    LAYER VISIBILITY HELPERS
    ============================================================ */
 const OPACITY_PROP: Record<string, string> = {
@@ -558,7 +554,7 @@ export default function ParkMapHoverReveal() {
     // map handlers — wired up once at map creation — read the values that match the <img> the
     // browser is actually rendering. Seeded with the lg defaults.
     const facadeParamsRef = useRef<{ staticW: number; staticH: number; staticZoom: number; staticCenter: [number, number] }>(
-        { staticW: 1280, staticH: 1280, staticZoom: 12.5, staticCenter: [-71.10, 42.32] }
+        { staticW: 1280, staticH: 1280, staticZoom: 11.9, staticCenter: [-71.10, 42.30] }
     )
     // Live-map "home" view = exactly what the facade static image shows. The image is cover-fit
     // into the container, so its effective zoom = staticZoom + the cover up-scale. Read the LIVE
@@ -588,13 +584,11 @@ export default function ParkMapHoverReveal() {
     const hoveredPinIdRef = useRef<string | null>(null)
     // Pending buffered clear for the dot hover (see HOVER_LEAVE_BUFFER_MS).
     const dotHoverClearRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-    // Hover-intent debounce timer for the card-hover fly (see handleCardHover).
-    const cardFlyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     // HOVER TAG anchoring: the currently-hovered dot's map coords + type, the rAF id driving
     // the tag's position, and a ref to the tag element. The tag is positioned IMPERATIVELY each
     // frame (no per-frame React re-render) so it stays flush against the dot's edge through the
     // hover-grow animation, zooming, and panning — none of which fire mousemove.
-    const hoveredTagRef = useRef<{ id: string; lng: number; lat: number; simple: boolean; label: string } | null>(null)
+    const hoveredTagRef = useRef<{ id: string; lng: number; lat: number; simple: boolean; label: string; edge: boolean } | null>(null)
     const tagRafRef = useRef(0)
     const tagElRef = useRef<HTMLDivElement>(null)
     // Facade equivalents — the facade hover tag tracks its dot's growing edge with a rAF that
@@ -681,13 +675,31 @@ export default function ParkMapHoverReveal() {
     // id of the carousel card currently hovered — that card grows to CARD_HOVER_W and pops OVER
     // its neighbours (the layout slot stays put, so nothing else shifts).
     const [hoveredCardId, setHoveredCardId] = useState("")
-    // Live map zoom — drives the conditional "View whole necklace" button (shown when zoomed
-    // in past ZOOM_OUT_MIN_ZOOM or out below VIEW_NECKLACE_BELOW_ZOOM) and the debug readout.
+    // Live map zoom — drives the conditional "View whole necklace" button (shown when the zoom
+    // strays more than BIRDEYE_SHOW_DELTA from the home framing) and the debug readout.
     // null until the live map has loaded.
     const [liveZoom, setLiveZoom] = useState<number | null>(null)
     // True when the Emerald Necklace is panned entirely outside the viewport — also drives the
     // "View whole necklace" button.
     const [necklaceOutOfFrame, setNecklaceOutOfFrame] = useState(false)
+    // Whether the "View whole necklace" button is shown, WITH hysteresis (see thresholds above) so it
+    // can't strobe at the zoom boundaries — the fresh intro reveal would otherwise replay on every flap.
+    const [zoomOutVisible, setZoomOutVisible] = useState(false)
+    useEffect(() => {
+        if (liveZoom == null) return
+        // Anchor to the CURRENT home zoom (recomputed live; deps include the container size so an
+        // orientation/resize re-evaluates it). Show once the live zoom is more than DELTA from home
+        // in either direction; hide (with hysteresis) once it's back well inside that band.
+        const home = computeHomeView().zoom
+        const inner = BIRDEYE_SHOW_DELTA - BIRDEYE_HIDE_HYST
+        setZoomOutVisible(prev => {
+            const show = liveZoom > home + BIRDEYE_SHOW_DELTA || liveZoom < home - BIRDEYE_SHOW_DELTA || necklaceOutOfFrame
+            const hide = liveZoom <= home + inner && liveZoom >= home - inner && !necklaceOutOfFrame
+            if (!prev && show) return true
+            if (prev && hide) return false
+            return prev   // dead band: keep current state
+        })
+    }, [liveZoom, necklaceOutOfFrame, containerWidth, containerHeight])
     // Hover state for the facade "Explore Map" CTA — shared so the inline map-icon chip
     // can squircle in sync with the button (its hover morph is driven from here).
     const [exploreHover, setExploreHover] = useState(false)
@@ -790,6 +802,10 @@ export default function ParkMapHoverReveal() {
             .catch(err => { setErrorMsg(err.message); setStatus("error") })
     }, [])
 
+    // Load the component's web fonts up-front (the facade uses them too), independent of the
+    // map — so titles render in Boldonse and body text in IBM Plex in any host environment.
+    useEffect(() => { ensureFonts() }, [])
+
     /* === SECTION: MAP INIT (deferred until the facade is activated) === */
     useEffect(() => {
         if (!mapActive) return   // FACADE: no Mapbox map until the user activates it
@@ -807,18 +823,16 @@ export default function ParkMapHoverReveal() {
                 center: initHome.center,
                 zoom: initHome.zoom,
                 minZoom: CONFIG.minZoom,
-                // --- Gestures start disabled (safe default) ---
-                // The ZONAL CONTROL effect (below) enables them while the pointer is in the
-                // live band and disables them in the bottom dead zone, so page scroll passes
-                // through there. If the effect never runs, the map stays fully locked — a
-                // safe fallback.
-                scrollZoom: false,       // desktop wheel zoom — lets the page scroll through
-                touchZoomRotate: false,  // mobile pinch-to-zoom + rotate
-                touchPitch: false,       // mobile two-finger pitch
-                doubleClickZoom: false,  // double-tap / double-click zoom
-                boxZoom: false,          // shift-drag zoom box
-                dragPan: false,          // panning by dragging (mobile one-finger swipe scrolls page)
-                dragRotate: false,       // right-drag / ctrl-drag rotate
+                // --- Gestures fully enabled: the map is directly interactive everywhere. ---
+                // (The old zonal dead-zone gating was removed; gestures are no longer gated by
+                // pointer position, so wheel/drag/pinch act on the map wherever the pointer is.)
+                scrollZoom: true,        // desktop wheel zoom
+                touchZoomRotate: true,   // mobile pinch-to-zoom + rotate
+                touchPitch: true,        // mobile two-finger pitch
+                doubleClickZoom: true,   // double-tap / double-click zoom
+                boxZoom: true,           // shift-drag zoom box
+                dragPan: true,           // panning by dragging
+                dragRotate: true,        // right-drag / ctrl-drag rotate
             })
 
             // NavigationControl (+/- zoom + compass, top-right) removed — zoom is via
@@ -1349,43 +1363,8 @@ export default function ParkMapHoverReveal() {
         return () => window.removeEventListener("parkmap:activate", activate)
     }, [])
 
-    /* === SECTION: ZONAL MAP CONTROL ===
-       Gestures are live only while the pointer is outside the dead zones (default: the
-       bottom 30vh). In a dead zone, wheel/drag/pinch fall through to the page (so it
-       scrolls). POI *clicks* still work everywhere — only gesture handlers are gated. */
-    useEffect(() => {
-        const map = mapRef.current
-        if (!map) return
-        const el = map.getContainer()
-        const GESTURES = ["scrollZoom", "boxZoom", "dragPan", "dragRotate", "doubleClickZoom", "touchZoomRotate", "touchPitch"]
-        let inBand: boolean | null = null
-        const apply = (clientX: number, clientY: number) => {
-            // Map-relative coords so the band tracks the map frame, not the window.
-            const rect = el.getBoundingClientRect()
-            const x = clientX - rect.left, y = clientY - rect.top
-            const w = rect.width, h = rect.height
-            const PAD = GESTURE_DEAD_PAD_PX
-            // Live band: inside the GESTURE_DEAD_PAD_PX border AND outside the top/bottom vh dead zones.
-            const topBound = Math.max(h * GESTURE_DEAD_TOP_VH, PAD)
-            const bottomBound = Math.min(h * (1 - GESTURE_DEAD_BOTTOM_VH), h - PAD)
-            const next = x >= PAD && x <= w - PAD && y >= topBound && y <= bottomBound
-            if (next === inBand) return
-            inBand = next
-            GESTURES.forEach(g => {
-                const handler = (map as any)[g]
-                if (handler) next ? handler.enable() : handler.disable()
-            })
-        }
-        const onMove = (e: PointerEvent) => apply(e.clientX, e.clientY)
-        el.addEventListener("pointermove", onMove)
-        el.addEventListener("pointerdown", onMove)
-        // Start dead — don't grab gestures until the pointer is confirmed in the live band.
-        GESTURES.forEach(g => (map as any)[g]?.disable())
-        return () => {
-            el.removeEventListener("pointermove", onMove)
-            el.removeEventListener("pointerdown", onMove)
-        }
-    }, [mapLoaded])
+    // (ZONAL MAP CONTROL removed — gestures are enabled at map init and are no longer gated
+    // by pointer position, so the map is directly interactive everywhere.)
 
     /* === SECTION: SYNC POI SOURCE === */
     useEffect(() => {
@@ -1405,13 +1384,13 @@ export default function ParkMapHoverReveal() {
         // treated as overlapping and fanned onto a ring (a pair lands SPREAD_PX apart) so
         // each stays visible + clickable. Recomputed on zoom, so the spread engages only
         // while dots actually overlap and always reads ~SPREAD_PX (no fly-apart on zoom-in).
-        const OVERLAP_PX = 4
-        const SPREAD_PX = 6
+        const OVERLAP_PX = 8
+        const SPREAD_PX = 12
         // ZOOM GATE: below this zoom the whole necklace collapses to a few pixels, so the
         // de-overlap fan would ring the ENTIRE dataset into one big circle. Only fan when zoomed
         // in past here; below it, dots stay at their true positions (reading as the necklace
         // shape, no circle). Raise/lower to tune where the fan kicks in.
-        const SPREAD_MIN_ZOOM = 10
+        const SPREAD_MIN_ZOOM = 12
         const buildAndSet = () => {
             const source = map.getSource("poi-source")
             if (!source) return
@@ -1953,12 +1932,38 @@ export default function ParkMapHoverReveal() {
         }
         if (!bounds || !mapRef.current) return
         isProgrammaticMoveRef.current = true
-        // CAROUSEL_PAD: bottom padding when fitting a park — keeps the park bounds above the carousel.
-        // The carousel sits at bottom:40 and cards are ~302px tall, so ~360px total.
-        // Increase this number if the park polygon still clips behind the carousel.
+        // FOCUS ZOOM is ALWAYS derived from FOCUS_PAD (the symmetric, carousel-aware "name-tap"
+        // framing), so a park focuses at the SAME per-park zoom regardless of entry point — a map
+        // name-tap (no `padding` arg) OR a filter selection (`padding` clears the left panel). The
+        // `padding` arg now ONLY re-centers the park; it no longer changes the zoom.
         const CAROUSEL_PAD = 360
-        const pad = padding ?? { top: 40, bottom: CAROUSEL_PAD, left: 40, right: 40 }
-        mapRef.current.fitBounds(bounds, { padding: pad, duration: 800 })
+        // CLAMP the vertical focus padding to the frame height. 360+360 exceeds a short / mobile
+        // container, which makes cameraForBounds return NaN → the fly silently no-ops ("no fly-to").
+        // Cap it so a >=160px park band always remains (tall frames still get the full 360).
+        const chPx = (map.getContainer && map.getContainer().clientHeight) || 800
+        const vPad = Math.max(40, Math.min(CAROUSEL_PAD, Math.floor((chPx - 160) / 2)))
+        const FOCUS_PAD = { top: vPad, bottom: vPad, left: 40, right: 40 }
+        // Per-park zoom boost: the two LARGEST parks fit too far out even when centered — nudge them
+        // in a touch (their edges then extend slightly past the frame, which reads fine that big).
+        // GLOBAL zoom-in: EVERY park lands this many zoom levels CLOSER than the plain fit, so the
+        // park FILLS the frame instead of sitting in a wide centered margin. Raise = closer, lower = less.
+        const PARK_ZOOM_IN = 1.6
+        const PARK_ZOOM_BOOST: Record<string, number> = { "Arnold Arboretum": 0.4, "Franklin Park": 0.4 }
+        const cam: any = map.cameraForBounds(bounds, { padding: FOCUS_PAD })
+        if (!cam || !Number.isFinite(cam.zoom)) {
+            mapRef.current.fitBounds(bounds, { padding: padding ?? FOCUS_PAD, duration: 800 })   // fallback
+            return
+        }
+        const zoom = cam.zoom + PARK_ZOOM_IN + (PARK_ZOOM_BOOST[layerId] ?? 0)
+        if (padding) {
+            // Filter selection: keep the name-tap focus zoom, but re-center the park's geo-center in
+            // the panel-cleared viewport (easeTo padding shifts the center to the right of the panel).
+            const c: [number, number] = [(bounds[0][0] + bounds[1][0]) / 2, (bounds[0][1] + bounds[1][1]) / 2]
+            map.easeTo({ center: c, zoom, padding, duration: 800 })
+        } else {
+            // Map name-tap / applied park: center in the carousel-aware band at the focus zoom.
+            map.easeTo({ center: cam.center, zoom, duration: 800 })
+        }
     }
 
     // LIVE FLY-TO: while the filter panel is open, fly to a park the instant it becomes the
@@ -2087,18 +2092,47 @@ export default function ParkMapHoverReveal() {
         const rest = liveDotRadius(zoom, c.simple)
         const radius = rest + hoverT * (liveDotHoverRadius(zoom) - rest) + liveDotStroke(c.simple)
         const cw = containerRef.current?.clientWidth ?? 1200
-        const estTagWidth = c.label.length * 8 + 24   // overestimate so we flip before clipping
-        const placeLeft = pt.x + radius + estTagWidth > cw - 8
-        el.style.left = (pt.x + (placeLeft ? -radius : radius)) + "px"
-        el.style.top = pt.y + "px"
-        el.style.transform = placeLeft ? "translate(-100%, -50%)" : "translateY(-50%)"
+        const ch = containerRef.current?.clientHeight ?? 800
+        // DETECTION rect — comfortable-visibility margins (clears the top Filter/Paths cluster and the
+        // bottom carousel strip). A dot outside this reads as off-screen and shows the edge arrow.
+        const rLeft = 40, rRight = cw - 40, rTop = 76, rBottom = ch - (24 + CARD_HOVER_H) - 8
+        const inView = pt.x >= rLeft && pt.x <= rRight && pt.y >= rTop && pt.y <= rBottom
+        if (!c.edge || inView) {
+            // FLUSH: pill beside the on-screen dot; flip to the dot's left near the right edge.
+            const estTagWidth = c.label.length * 8 + 24   // overestimate so we flip before clipping
+            const placeLeft = pt.x + radius + estTagWidth > cw - 8
+            el.style.left = (pt.x + (placeLeft ? -radius : radius)) + "px"
+            el.style.top = pt.y + "px"
+            el.style.transform = placeLeft ? "translate(-100%, -50%)" : "translateY(-50%)"
+            el.dataset.edge = ""
+            return
+        }
+        // EDGE: dot is off-screen → show ONLY the arrow (CSS strips the pill body via data-edge),
+        // anchored at the TRUE frame edge (sits in the ~24px UI padding). The DIRECTION comes from the
+        // detection overshoot (control/carousel-aware); the perpendicular position tracks the dot,
+        // clamped to the true frame. The arrow box is zero-size, centered on the anchor.
+        const PAD = 20   // rest gap 8px (PAD - 2 margin - 10 depth) exceeds the 6px hop, so the arrow hops OUT to ~2px from the edge at its peak but never crosses the frame (no clip)
+        const dox = pt.x - Math.max(rLeft, Math.min(rRight, pt.x))
+        const doy = pt.y - Math.max(rTop, Math.min(rBottom, pt.y))
+        el.style.transform = "translate(-50%, -50%)"
+        if (Math.abs(dox) >= Math.abs(doy)) {
+            el.style.left = (dox > 0 ? cw - PAD : PAD) + "px"
+            el.style.top = Math.max(PAD, Math.min(ch - PAD, pt.y)) + "px"
+            el.dataset.edge = dox > 0 ? "r" : "l"
+        } else {
+            el.style.top = (doy > 0 ? ch - PAD : PAD) + "px"
+            el.style.left = Math.max(PAD, Math.min(cw - PAD, pt.x)) + "px"
+            el.dataset.edge = doy > 0 ? "b" : "t"
+        }
     }
     function tagLoop() {
         positionTag()
         tagRafRef.current = hoveredTagRef.current ? requestAnimationFrame(tagLoop) : 0
     }
-    function showHoverTag(id: string, label: string, lng: number, lat: number, simple: boolean) {
-        hoveredTagRef.current = { id, lng, lat, simple, label }
+    // `edge` = allow this tag to clamp to the frame edge when the dot is off-screen (card hover +
+    // featured rotation). A direct map-dot hover leaves it false → always flush to the on-screen dot.
+    function showHoverTag(id: string, label: string, lng: number, lat: number, simple: boolean, edge = false) {
+        hoveredTagRef.current = { id, lng, lat, simple, label, edge }
         const pt = mapRef.current ? mapRef.current.project([lng, lat]) : { x: 0, y: 0 }
         setHoveredPin({ label, x: pt.x, y: pt.y, simple })   // initial; positionTag() takes over each frame
         if (!tagRafRef.current) tagRafRef.current = requestAnimationFrame(tagLoop)
@@ -2129,7 +2163,7 @@ export default function ParkMapHoverReveal() {
         animateHoverT(poiId, 1)
         // Tag too, so it matches a direct map-dot hover. Anchored to the POI's map position.
         const poi = poisRef.current.find(p => p.id === poiId)
-        if (poi) showHoverTag(poiId, poi.name, poi.longitude, poi.latitude, isSimplePOI(poi))
+        if (poi) showHoverTag(poiId, poi.name, poi.longitude, poi.latitude, isSimplePOI(poi), true)
     }
     function unhighlightDot(poiId: string) {
         const map = mapRef.current
@@ -2139,60 +2173,13 @@ export default function ParkMapHoverReveal() {
         if (hoveredPinIdRef.current === poiId) { hoveredPinIdRef.current = null; hideHoverTag() }
     }
 
-    // Smoothly center a POI dot on screen (zoom 14, slight zoom-out dip, lifted above the carousel
-    // on short viewports). Shared by the idle attract rotation and the card-hover fly below; the
-    // caller picks the pace via duration.
-    function flyToCenterPOI(poi: POIRecord, duration: number, minZoomFloor: number = 13.9) {
-        const map = mapRef.current
-        if (!map) return
-        isProgrammaticMoveRef.current = true   // the mid-flight zoom-out must not trip the zoomend park-reset
-        const el = map.getContainer()
-        const bottomPad = Math.max(0, 2 * (24 + CARD_HOVER_H + 28) - el.clientHeight)
-        // Distance-proportional zoom-out: scale the flight's peak (most zoomed-out point) by how far
-        // the target sits from screen center. Short hops barely dip (almost a straight pan); long hops
-        // pull back toward minZoomFloor. Clamp the peak to the current zoom so a short hop from an
-        // already-zoomed-out camera just glides in (no pointless dip-then-climb).
-        const to = map.project([poi.longitude, poi.latitude])
-        const travelPx = Math.hypot(to.x - el.clientWidth / 2, to.y - el.clientHeight / 2)
-        const t = Math.max(0, Math.min(1, (travelPx - FLY_NEAR_PX) / (FLY_FAR_PX - FLY_NEAR_PX)))
-        const peak = Math.min(FLY_NEAR_PEAK + (minZoomFloor - FLY_NEAR_PEAK) * t, map.getZoom())
-        map.flyTo({
-            center: [poi.longitude, poi.latitude],
-            zoom: 14,
-            minZoom: peak,   // peak (max zoom-out) of the flight — hard cap, can't compound
-            curve: 1.4,
-            duration,
-            padding: { top: 0, bottom: bottomPad, left: 0, right: 0 },
-            easing: featuredEase,
-        })
-    }
 
     function handleCardHover(poiId: string) {
-        highlightDot(poiId)   // instant feedback: dot grow + name tag
-        // HOVER-INTENT: only fly after the cursor SETTLES on a card (~180ms). A quick sweep A->B->C
-        // cancels the intermediate flies, so the camera moves only to the card you land on — it can
-        // never finish centered on a card you've already moved off of.
-        if (cardFlyTimerRef.current) clearTimeout(cardFlyTimerRef.current)
-        cardFlyTimerRef.current = setTimeout(() => {
-            cardFlyTimerRef.current = null
-            if (hoveredPinIdRef.current !== poiId) return   // hover moved/ended before the delay elapsed
-            const map = mapRef.current
-            if (!map || !mapLoadedRef.current) return
-            const poi = poisRef.current.find(p => p.id === poiId)
-            if (!poi) return
-            const pt = map.project([poi.longitude, poi.latitude])
-            const el = map.getContainer()
-            const m = 40                                                 // side edge margin
-            const topM = 76                                             // clear the top Filter/Paths controls (top:24 + ~48 tall)
-            const carouselTop = el.clientHeight - (24 + CARD_HOVER_H)    // bottom strip the carousel covers
-            const inView = pt.x >= m && pt.x <= el.clientWidth - m && pt.y >= topM && pt.y <= carouselTop - 8
-            // Fly if the dot isn't comfortably in view, OR the camera is still animating (a prior
-            // fly makes "in view" unreliable) — guarantees we end on the card actually hovered.
-            if (!inView || map.isMoving()) flyToCenterPOI(poi, HOVER_FLY_MS, HOVER_FLY_MIN_ZOOM)
-        }, HOVER_FLY_INTENT_MS)
+        // No map movement on hover. highlightDot shows the dot-grow + name tag instantly; when the
+        // dot is off-screen, positionTag() clamps that tag to the frame edge (with a chevron) instead.
+        highlightDot(poiId)
     }
     function handleCardHoverEnd(poiId: string) {
-        if (cardFlyTimerRef.current) { clearTimeout(cardFlyTimerRef.current); cardFlyTimerRef.current = null }
         unhighlightDot(poiId)
     }
 
@@ -2210,8 +2197,8 @@ export default function ParkMapHoverReveal() {
         setHoveredCardId(poi.id)             // carousel card grows (hoveredExternally)
         revealCard(poi.id)                   // scroll the focused card into view
         featuredAutoIdRef.current = poi.id
-        // Glide to center this POI (shared centering+zoom helper); 4s for a calm attract pace.
-        flyToCenterPOI(poi, FEATURED_FLY_MS)
+        // No fly — the rotation cycles the highlight + tag (+ card scroll) WITHOUT moving the map;
+        // an off-screen featured dot surfaces its edge label via positionTag.
     }
 
     function startFeatured() {
@@ -2361,20 +2348,19 @@ export default function ParkMapHoverReveal() {
     // lg chips crowd it. On lg with chips the collapsed button keeps a fixed 48px layout
     // slot and OVERFLOWS to the right over the chips on reveal (see the absolute wrapper in
     // the render); on sm the label is revealed by a tap for ~1s instead of on hover.
-    const zoomIconOnly = isSm || chipsVisible
 
     // Always use the compact sm-scale POI cards in the carousel — on every
     // breakpoint, and both before AND after the Mapbox map is engaged. (The lg
     // pill cards are no longer used; the small cards stay put through activation.)
     const useSmCards = true
     // Compact 160px-wide cards at rest (more visible per screen).
-    const cardWidth = useSmCards ? 160 : Math.min(263, containerWidth - 72)
+    const cardWidth = useSmCards ? 160 : Math.min(263, containerWidth - 72)   // sm rest width (portrait 140x160)
     // Resting card height, and the size a card grows to while hovered. On hover it pops to
     // CARD_HOVER_W × CARD_HOVER_H, popping OVER its neighbours (the layout slot's WIDTH stays
     // put so nothing shifts sideways; it grows taller by extending UPWARD, bottom-anchored, so
     // the info panel stays put and the photo gets taller).
-    const CARD_REST_H = 180
-    const CARD_HOVER_W = 200
+    const CARD_REST_H = 160   // sm card + its image (image fills the card) — 20px shorter
+    const CARD_HOVER_W = 180
     const CARD_HOVER_H = 240
 
     // HOVER-REVEAL: while on the facade and not hovering, hide the Filter/Paths/
@@ -2409,8 +2395,8 @@ export default function ParkMapHoverReveal() {
     // it lands in — exactly the same center/zoom the live map opens at (see computeHomeView), so
     // the facade→live swap still doesn't reframe. Centered on the Emerald Necklace.
     const [staticW, staticH] = [1280, 1280]
-    const staticCenter: [number, number] = [-71.10, 42.32]
-    const staticZoom = 12.5
+    const staticCenter: [number, number] = [-71.10, 42.31]
+    const staticZoom = 11.9
     // Bump STATIC_MAP_REV after re-publishing the Mapbox style in Studio to force the
     // facade to pull a fresh render (busts the Static Images API / browser cache).
     const STATIC_MAP_REV = 3
@@ -2905,35 +2891,6 @@ export default function ParkMapHoverReveal() {
                     </motion.div>
                 )}
             </AnimatePresence>
-            {/* DEBUG: faint tint over the gesture dead zone(s); gestures are live in the
-                clear band. pointer-events:none so it never interferes. Off in production
-                (SHOW_GESTURE_ZONE_DEBUG). */}
-            {SHOW_GESTURE_ZONE_DEBUG && (
-                <>
-                    {(["top", "bottom"] as const)
-                        .filter(edge => (edge === "top" ? GESTURE_DEAD_TOP_VH : GESTURE_DEAD_BOTTOM_VH) > 0)
-                        .map(edge => (
-                        <div key={edge} style={{
-                            position: "fixed", left: 0, right: 0, [edge]: 0,
-                            height: `${Math.round((edge === "top" ? GESTURE_DEAD_TOP_VH : GESTURE_DEAD_BOTTOM_VH) * 100)}vh`,
-                            background: "rgba(31,47,22,0.12)",
-                            borderBottom: edge === "top" ? `1px dashed ${C.salix}` : undefined,
-                            borderTop: edge === "bottom" ? `1px dashed ${C.salix}` : undefined,
-                            zIndex: 9, pointerEvents: "none",
-                            display: "flex", alignItems: edge === "top" ? "flex-end" : "flex-start",
-                            justifyContent: "center",
-                        }}>
-                            <span style={{
-                                fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 500,
-                                color: C.salix, padding: 6, opacity: 0.7,
-                            }}>
-                                no map gestures
-                            </span>
-                        </div>
-                    ))}
-                </>
-            )}
-
             {/* (Loading / error message now lives in the CENTER CTA above —
                 "Explore Map" morphs into "Finding {critter}…".) */}
 
@@ -2943,6 +2900,7 @@ export default function ParkMapHoverReveal() {
                 animation. Side flips to avoid clipping: placed to the RIGHT by default, but to the
                 LEFT when the right placement would run off the container's right edge (so a dot near
                 the left edge gets the tag on its right, a dot near the right edge gets it on the left). */}
+            <AnimatePresence>
             {hoveredPin && !selectedId && (() => {
                 // left/top/transform below are a sensible INITIAL only — positionTag() (rAF +
                 // useLayoutEffect) immediately drives the real position so the tag stays flush
@@ -2951,12 +2909,23 @@ export default function ParkMapHoverReveal() {
                 const estTagWidth = hoveredPin.label.length * 8 + 24   // overestimate so we flip before clipping
                 const placeLeft = hoveredPin.x + GAP + estTagWidth > containerWidth - 8
                 return (
-                    <div ref={tagElRef} style={{
+                    <motion.div
+                        key="hover-tag"
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        transition={{ duration: 0.18, ease: "easeOut" }}
+                        style={{ position: "absolute", inset: 0, zIndex: 2, pointerEvents: "none" }}
+                    >
+                    {/* OFF-SCREEN indicator = arrow ONLY: the [data-edge] rule strips the pill body
+                        (bg/border/padding/text), leaving just the ::after chevron pointing toward the
+                        off-screen dot, in salix. Flush (in-view) mode keeps the full name pill. */}
+                    <style>{`@keyframes pm-hop-r{0%,60%,100%{transform:translateY(-50%) translateX(0)}30%{transform:translateY(-50%) translateX(6px)}}@keyframes pm-hop-l{0%,60%,100%{transform:translateY(-50%) translateX(0)}30%{transform:translateY(-50%) translateX(-6px)}}@keyframes pm-hop-t{0%,60%,100%{transform:translateX(-50%) translateY(0)}30%{transform:translateX(-50%) translateY(-6px)}}@keyframes pm-hop-b{0%,60%,100%{transform:translateX(-50%) translateY(0)}30%{transform:translateX(-50%) translateY(6px)}}.pm-edge-tag::after{content:"";position:absolute;width:0;height:0;border:10px solid transparent;display:none}.pm-edge-tag[data-edge="r"],.pm-edge-tag[data-edge="l"],.pm-edge-tag[data-edge="t"],.pm-edge-tag[data-edge="b"]{background:transparent!important;border:0!important;padding:0!important;font-size:0!important}.pm-edge-tag[data-edge="r"]::after{display:block;left:100%;top:50%;transform:translateY(-50%);transform-origin:right center;margin-left:2px;border-left-color:${C.salix};border-right-width:0;animation:pm-hop-r 1s ease-in-out infinite}.pm-edge-tag[data-edge="l"]::after{display:block;right:100%;top:50%;transform:translateY(-50%);transform-origin:left center;margin-right:2px;border-right-color:${C.salix};border-left-width:0;animation:pm-hop-l 1s ease-in-out infinite}.pm-edge-tag[data-edge="t"]::after{display:block;left:50%;bottom:100%;transform:translateX(-50%);transform-origin:center top;margin-bottom:2px;border-bottom-color:${C.salix};border-top-width:0;animation:pm-hop-t 1s ease-in-out infinite}.pm-edge-tag[data-edge="b"]::after{display:block;left:50%;top:100%;transform:translateX(-50%);transform-origin:center bottom;margin-top:2px;border-top-color:${C.salix};border-bottom-width:0;animation:pm-hop-b 1s ease-in-out infinite}`}</style>
+                    <div ref={tagElRef} className="pm-edge-tag" style={{
                         position: "absolute",
                         left: hoveredPin.x + (placeLeft ? -GAP : GAP),
                         top: hoveredPin.y,
                         transform: placeLeft ? "translate(-100%, -50%)" : "translateY(-50%)",
-                        zIndex: 2,
                         pointerEvents: "none",
                         // Pill shaped, styled like the Simple POI hover dot: lemna fill + 1px salix
                         // ring. Text is salix (static) for contrast against the light lemna fill.
@@ -2972,8 +2941,10 @@ export default function ParkMapHoverReveal() {
                     }}>
                         {hoveredPin.label}
                     </div>
+                    </motion.div>
                 )
             })()}
+            </AnimatePresence>
 
 
             {/* ===== FILTER BUTTON + ACTIVE FILTER CHIPS — top left ===== */}
@@ -2992,10 +2963,10 @@ export default function ParkMapHoverReveal() {
                         the Filter label — collapse Filter (and Zoom Out) to icon-only while open. */}
                     <FilterButton onClick={openFilters} count={isSm ? appliedFilterCount : 0} iconOnly={isSm && pathsOpen} />
                     {/* "View whole necklace" — appears under Filter when the user has strayed from
-                        the home framing: zoomed IN past ZOOM_OUT_MIN_ZOOM, zoomed OUT below
-                        VIEW_NECKLACE_BELOW_ZOOM, or the necklace panned fully out of frame. Returns home. */}
+                        the home framing (the live zoom more than BIRDEYE_SHOW_DELTA from home
+                        in either direction), or the necklace panned fully out of frame. Returns home. */}
                     <AnimatePresence>
-                        {liveZoom != null && (liveZoom > ZOOM_OUT_MIN_ZOOM || liveZoom < VIEW_NECKLACE_BELOW_ZOOM || necklaceOutOfFrame) && (
+                        {zoomOutVisible && (
                             <motion.div
                                 key="zoom-out-btn"
                                 initial={{ opacity: 0, y: -8, scale: 0.9 }}
@@ -3012,7 +2983,7 @@ export default function ParkMapHoverReveal() {
                                     the chips instead of pushing the layout. The wrapper shrink-wraps
                                     the button, so its width follows the reveal. */}
                                 <div style={chipsVisible ? { position: "absolute", top: 0, left: 0, zIndex: 2 } : undefined}>
-                                    <ZoomOutButton onClick={goHome} iconOnly={zoomIconOnly} tapReveal={isSm} />
+                                    <ZoomOutButton onClick={goHome} tapReveal={isSm} />
                                 </div>
                             </motion.div>
                         )}
@@ -3198,7 +3169,10 @@ export default function ParkMapHoverReveal() {
                             scrollSnapType: "x mandatory",
                             msOverflowStyle: "none" as any,
                             scrollbarWidth: "none" as any,
-                            pointerEvents: "auto",
+                            // Interactive ONLY when there are cards. Otherwise the track (still
+                            // mounted + ~card-height tall) would sit over the map and swallow all
+                            // clicks/drags/wheel in the bottom strip, blocking map control there.
+                            pointerEvents: carouselPOIs.length > 0 ? "auto" : "none",
                             touchAction: "pan-x",
                             WebkitOverflowScrolling: "touch" as any,   // iOS momentum
                             userSelect: "none",
@@ -3536,62 +3510,97 @@ function FilterButton({ onClick, count = 0, iconOnly = false }: { onClick: () =>
     )
 }
 
-// ZOOM OUT button — same pill style as FilterButton, with the lucide "fullscreen" icon. Flies
-// the map back to its initial launch view (see goHome).
-//   iconOnly  = collapse to a 48px icon-only pill (lg: when chips crowd the bar; sm: always).
-//   tapReveal = touch/sm mode: NO hover behavior; a tap flashes the label for ~1s, then it
-//               collapses again (the goHome action still fires on that tap).
-//   On lg, holding a hover over the collapsed pill for 0.1s reveals the label; leaving collapses.
-function ZoomOutButton({ onClick, iconOnly = false, tapReveal = false }: { onClick: () => void; iconOnly?: boolean; tapReveal?: boolean }) {
+// ZOOM OUT button — same pill style as FilterButton, with the "Birdeye" bird glyph. Flies the map
+// back to its initial launch view (see goHome).
+//   On first appearance it shows its FULL label for ZOOM_OUT_INTRO_MS (an intro), then collapses to
+//   a 48px icon-only pill. After that: lg -> hovering 0.1s re-reveals the label (leaving collapses);
+//   sm/touch (tapReveal) -> no hover, a tap flashes the label ~1s (the goHome action still fires).
+const ZOOM_OUT_INTRO_MS = 1200
+function ZoomOutButton({ onClick, tapReveal = false }: { onClick: () => void; tapReveal?: boolean }) {
     const [hovered, setHovered] = useState(false)
-    const [revealed, setRevealed] = useState(false)   // label currently revealed (hover-held or tap-flashed)
+    const [revealed, setRevealed] = useState(false)     // label temporarily shown (hover-held or tap-flashed)
+    const [introOpen, setIntroOpen] = useState(true)    // full-label intro on first appearance, then collapse
     const revealTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+    const introTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+    const hoveredRef = useRef(false)
+    // Keep the latest tapReveal readable inside the []-deps intro timer (which otherwise closes over
+    // the mount-time value), so a breakpoint change mid-intro doesn't reveal on the wrong device.
+    const tapRevealRef = useRef(tapReveal)
+    tapRevealRef.current = tapReveal
+    // Natural full width (icon slot + label), measured so we can animate width between an explicit px
+    // value and 48 — a REAL width tween (browsers won't animate to `auto`), and overflow:hidden then
+    // wipes the label left->right on open / right->left on collapse. Re-measure once the web font
+    // loads (it changes the label's width).
+    const btnRef = useRef<HTMLButtonElement>(null)
+    const [fullWidth, setFullWidth] = useState<number | undefined>(undefined)
+    useEffect(() => {
+        const measure = () => { const el = btnRef.current; if (el) setFullWidth(el.scrollWidth) }
+        measure()
+        const d: any = typeof document !== "undefined" ? document : null
+        if (d && d.fonts && d.fonts.ready) d.fonts.ready.then(measure)
+    }, [])
 
     const clearReveal = () => { if (revealTimer.current) { clearTimeout(revealTimer.current); revealTimer.current = null } }
-    // lg/hover: reveal after a 0.1s hover; sm/touch: hover does nothing (handled on tap).
+
+    // INTRO: full label for ZOOM_OUT_INTRO_MS on first appearance, then collapse to the icon-only
+    // pill. If the cursor is already over it when the intro ends, keep the label up (no flicker).
+    useEffect(() => {
+        introTimer.current = setTimeout(() => {
+            setIntroOpen(false)
+            if (hoveredRef.current && !tapRevealRef.current) setRevealed(true)
+        }, ZOOM_OUT_INTRO_MS)
+        return () => { if (introTimer.current) clearTimeout(introTimer.current) }
+    }, [])
+    useEffect(() => () => clearReveal(), [])
+
+    // After the intro the button is icon-only. lg/hover: reveal after a 0.1s hover; sm/touch: no hover.
     const onEnter = () => {
-        if (tapReveal) return
+        if (tapReveal) return   // touch has no hover; keep hoveredRef a lg/desktop-only signal
+        hoveredRef.current = true
         setHovered(true)
-        if (iconOnly) revealTimer.current = setTimeout(() => setRevealed(true), 100)
+        if (!introOpen) revealTimer.current = setTimeout(() => setRevealed(true), 100)
     }
     const onLeave = () => {
+        hoveredRef.current = false
         if (tapReveal) return
         setHovered(false); clearReveal(); setRevealed(false)
     }
-    // sm/touch: a tap flashes the label for ~1s, then collapses; the action still runs.
+    // sm/touch: after the intro, a tap flashes the label for ~1s, then collapses; the action still runs.
     const handleClick = () => {
-        if (tapReveal && iconOnly) {
+        if (tapReveal && !introOpen) {
             clearReveal()
             setRevealed(true)
             revealTimer.current = setTimeout(() => setRevealed(false), 1000)
         }
         onClick()
     }
-    // If it stops being collapsible while revealed, drop the reveal + timer.
-    useEffect(() => { if (!iconOnly) { clearReveal(); setRevealed(false) } }, [iconOnly])
-    useEffect(() => () => clearReveal(), [])
 
-    const collapsed = iconOnly && !revealed   // icon-only right now (no label, 48px circle)
+    const collapsed = !introOpen && !revealed   // icon-only (48px circle) after the intro, unless revealed
 
     return (
         <button
+            ref={btnRef}
             onClick={handleClick}
             aria-label="Birdeye whole necklace"
             onMouseEnter={onEnter}
             onMouseLeave={onLeave}
             style={{
                 height: 48,
-                width: collapsed ? 48 : undefined,
+                width: collapsed ? 48 : fullWidth,
                 borderRadius: 100,
                 background: hovered ? C.cygnusHover : C.cygnus,
                 border: `1px solid ${C.salix}`,
                 cursor: "pointer",
-                display: "flex", alignItems: "center", justifyContent: "center",
-                gap: 8,
-                padding: collapsed ? 0 : "0 24px 0 20px",
-                transition: "background 0.15s ease, width 0.32s cubic-bezier(0.4, 0, 0.2, 1), padding 0.32s cubic-bezier(0.4, 0, 0.2, 1)",
+                // Icon anchored LEFT in a fixed slot so it NEVER shifts; the label reveals/hides to its
+                // right as the width animates, and overflow:hidden wipes it left->right / right->left.
+                display: "flex", alignItems: "center", justifyContent: "flex-start",
+                padding: 0,
+                overflow: "hidden",   // clips the label -> directional wipe as the width tweens
+                transition: "background 0.15s ease, width 0.4s cubic-bezier(0.4, 0, 0.2, 1)",
             }}
         >
+            {/* Fixed 48px slot keeps the bird centered + STEADY in every state. */}
+            <div style={{ width: 48, height: 48, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
             {/* "Birdeye" — a swooping bird glyph, salix-themed, 20x20 to match the nav icons */}
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={C.salix} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
                 <path d="M16.0098 5.75C16.0892 5.75 16.1668 5.75828 16.2422 5.77246C16.0975 5.86007 16 6.01771 16 6.19922C16 6.47536 16.2239 6.69922 16.5 6.69922H16.5098C16.77 6.69922 16.9811 6.50014 17.0049 6.24609C17.164 6.45584 17.2598 6.7164 17.2598 7C17.2598 7.69036 16.7001 8.25 16.0098 8.25H16C15.3096 8.25 14.75 7.69036 14.75 7C14.75 6.30964 15.3096 5.75 16 5.75H16.0098Z" fill={C.salix} stroke="none" />
@@ -3601,15 +3610,18 @@ function ZoomOutButton({ onClick, iconOnly = false, tapReveal = false }: { onCli
                 <path d="M14 17.75V21" />
                 <path d="M7 18.0006C8.23312 18.0006 9.43627 17.6206 10.4457 16.9123C11.4552 16.2041 12.2219 15.2021 12.6416 14.0425C13.0612 12.883 13.1134 11.6224 12.7911 10.4321C12.4687 9.24189 11.7874 8.17988 10.84 7.39062" />
             </svg>
-            {!collapsed && (
-                <span style={{
-                    font: "500 14px/1 'IBM Plex Sans', sans-serif",
-                    color: C.salix,
-                    letterSpacing: "0.02em",
-                    textTransform: "uppercase",
-                    whiteSpace: "nowrap",
-                }}>Birdeye whole necklace</span>
-            )}
+            </div>
+            {/* Label always mounted (keeps the icon layout stable); the button's width tween +
+                overflow:hidden wipe it in left->right (and out right->left) — no uniform fade. */}
+            <span style={{
+                font: "500 14px/1 'IBM Plex Sans', sans-serif",
+                color: C.salix,
+                letterSpacing: "0.02em",
+                textTransform: "uppercase",
+                whiteSpace: "nowrap",
+                flexShrink: 0,
+                paddingRight: 24,
+            }}>Birdeye whole necklace</span>
         </button>
     )
 }
@@ -3667,7 +3679,11 @@ function POICard({ poi, isActive, cardWidth, cardHeight, isSm, hoveredExternally
             style={{
                 width: imageWidth, height: totalHeight,
                 position: "relative", cursor: "pointer", flexShrink: 0,
-                transition: "width 0.3s ease, height 0.3s ease",   // both animate (content height, not the flex item)
+                // Slight drop shadow on the HIGHLIGHTED (hovered / map-linked) card. drop-shadow
+                // follows the card's actual silhouette (rounded photo + info panel) — a box-shadow
+                // would be a rectangle behind the rounded shape.
+                filter: hovered ? "drop-shadow(0 4px 10px rgba(31,47,22,0.22))" : "none",
+                transition: "width 0.3s ease, height 0.3s ease, filter 0.3s ease",   // both animate (content height, not the flex item)
             }}
         >
             {/* Photo — behind the info panel. sm: circle → squircle on hover. */}
@@ -3853,7 +3869,7 @@ function POIDetailPanel({ poi, onClose, isSm }: { poi: POIRecord | null; onClose
                         <a
                             href={`${CONFIG.siteBaseUrl}/poi/${poi.slug}`}
                             style={{
-                                flex: 1, height: 72, boxSizing: "border-box",
+                                flex: 1, height: isSm ? 56 : 72, boxSizing: "border-box",
                                 display: "flex", alignItems: "center", justifyContent: "center",
                                 background: C.cygnus, textDecoration: "none",
                                 border: `1px solid ${C.salix}`,
@@ -3876,7 +3892,7 @@ function POIDetailPanel({ poi, onClose, isSm }: { poi: POIRecord | null; onClose
                     {/* Close / X button — to the RIGHT of LEARN MORE, in all cases */}
                     <button onClick={onClose} aria-label="Close" style={{
                         flexShrink: 0,
-                        width: 72, height: 72, boxSizing: "border-box",
+                        width: isSm ? 56 : 72, height: isSm ? 56 : 72, boxSizing: "border-box",
                         background: C.cygnus,
                         border: `1px solid ${C.salix}`,
                         borderRadius: "50%", // square dims + 50% radius → circle
@@ -3914,7 +3930,7 @@ function POIDetailPanel({ poi, onClose, isSm }: { poi: POIRecord | null; onClose
                         background: C.cygnus,
                         marginBottom: 24,
                         fontFamily: "'Boldonse', sans-serif",
-                        fontSize: 24, color: C.salix,
+                        fontSize: 14, color: C.salix,
                         textTransform: "uppercase", letterSpacing: "0.02em",
                         lineHeight: 1.8,
                     }}>
@@ -3924,10 +3940,10 @@ function POIDetailPanel({ poi, onClose, isSm }: { poi: POIRecord | null; onClose
                     {/* Info rows — label stacked above value */}
                     <div style={{ display: "flex", flexDirection: "column", gap: 16, background: C.cygnus }}>
                         {infoRows.map((row, i) => (
-                            <div key={i} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                            <div key={i} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                                 <div style={{
                                     fontFamily: "'IBM Plex Sans', sans-serif",
-                                    fontSize: 12, fontWeight: 700,
+                                    fontSize: 12, fontWeight: 600,
                                     color: C.salix, textTransform: "uppercase",
                                     letterSpacing: "0.04em",
                                 }}>
@@ -3939,7 +3955,7 @@ function POIDetailPanel({ poi, onClose, isSm }: { poi: POIRecord | null; onClose
                                         target="_blank" rel="noopener noreferrer"
                                         style={{
                                             fontFamily: "'IBM Plex Mono', monospace",
-                                            fontSize: 12, fontWeight: 500, color: C.salix,
+                                            fontSize: 13, fontWeight: 400, color: C.salix,
                                             lineHeight: 1.5, textDecoration: "underline",
                                         }}
                                     >
@@ -3948,13 +3964,13 @@ function POIDetailPanel({ poi, onClose, isSm }: { poi: POIRecord | null; onClose
                                 ) : (
                                     <div style={{
                                         fontFamily: "'IBM Plex Mono', monospace",
-                                        fontSize: 12, fontWeight: 500, color: C.salix, lineHeight: 1.5,
+                                        fontSize: 13, fontWeight: 400, color: C.salix, lineHeight: 1.5,
                                         whiteSpace: "pre-line",
                                     }}>
                                         {row.value}
                                     </div>
                                 )}
-                                <div style={{ height: 1, background: `rgba(31,47,22,0.15)`, marginTop: 4 }} />
+                                <div style={{ height: 1, background: `rgba(31,47,22,0.15)`, marginTop: 8 }} />
                             </div>
                         ))}
                     </div>

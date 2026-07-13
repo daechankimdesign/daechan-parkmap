@@ -1,0 +1,13 @@
+/* Reset default browser chrome so the full-viewport map reaches every edge.
+   Without this, the browser's default 8px body margin shows as gaps at the
+   top and left screen edges. */
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+#root {
+  width: 100%;
+  height: 100vh;
+}

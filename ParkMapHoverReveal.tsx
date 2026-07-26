@@ -3,6 +3,8 @@
 import { addPropertyControls, ControlType } from "framer"
 import { AnimatePresence, motion } from "framer-motion"
 import React, { useEffect, useMemo, useRef, useState } from "react"
+// Frozen facade plate, used when the Mapbox Static Images request fails. See FACADE_FALLBACK.
+import facadeFallbackSrc from "./facade-lg.png"
 
 /* ============================================================
    CONFIG
@@ -212,6 +214,45 @@ const PATHS_FALLBACK: Record<string, string[]> = {
     // the Mapbox style array (Walking Paths at index 36, Bike Paths at 37). Keeping the same
     // category key means a path toggled on the facade carries over to the live map.
     Paths: ["Walking Paths", "Bike Paths"],
+}
+
+/* ============================================================
+   FACADE IMAGE FRAMING + FALLBACK
+   The facade is a single fixed render for EVERY screen size (no sm/lg split), so it never
+   changes with the viewport. Square + a single zoom keeps it orientation-neutral; the
+   <img>'s objectFit:cover then crops it to whatever container shape it lands in.
+
+   PRIMARY is fetched live from the Mapbox Static Images API. If that request fails —
+   a 403 from a URL-restricted token, a CDN hiccup, an exhausted quota — the <img>'s
+   onError swaps in FALLBACK, a screenshot bundled with the app, instead of leaving the
+   user with a broken-image icon over an empty green page.
+
+   CRITICAL: each entry carries its OWN w/h/zoom/center because the facade POI dots are
+   PROJECTED from these numbers (see the facadeDots memo) and the live map's home view is
+   derived from them (computeHomeView). A plate captured at a different center/zoom would
+   land every dot in the wrong place and reframe the facade→live swap. So if you replace
+   the fallback image, update its framing here to match how it was actually captured.
+   ============================================================ */
+const FACADE_PRIMARY = {
+    w: 1280,
+    h: 1280,
+    zoom: 11.9,
+    center: [-71.1, 42.31] as [number, number],
+}
+const FACADE_FALLBACK = {
+    // Bundled via ESM import, so Vite fingerprints it and resolves the GitHub Pages base
+    // path (/daechan-parkmap/) automatically — no public/ copy to keep in sync.
+    src: facadeFallbackSrc,
+    // The plate's TRUE pixel size and capture framing. These were not recorded anywhere when
+    // the image was frozen, so they were recovered by measurement: a least-squares fit of four
+    // landmarks (Charlesgate, Franklin Park, Jamaica Pond, Arnold Arboretum) solved for
+    // worldSize + origin, then verified by projecting all 28 live POIs onto the plate and
+    // confirming they land inside their parks. Residuals were under ~32px on a 2560px-wide
+    // image (~1%). If you swap the image, re-measure — don't assume these carry over.
+    w: 2560,
+    h: 1440,
+    zoom: 12.7803,
+    center: [-71.09728, 42.31496] as [number, number],
 }
 
 /* ============================================================
@@ -671,6 +712,12 @@ export default function ParkMapHoverReveal() {
     const HIDE_DELAY_MS = 700
     // true once the minimum loading-message display time has elapsed after activation
     const [minLoadElapsed, setMinLoadElapsed] = useState(false)
+    // FACADE FALLBACK: flips true if the Mapbox Static Images request fails (403 from a
+    // URL-restricted token, CDN error, exhausted quota). Swaps the <img> to the bundled
+    // screenshot AND switches the facade framing to that plate's own params — see
+    // FACADE_PRIMARY / FACADE_FALLBACK. One-way: it never flips back, so a failing remote
+    // image can't flicker against the fallback.
+    const [facadeImgFailed, setFacadeImgFailed] = useState(false)
     const [hoveredPin, setHoveredPin] = useState<{ label: string; x: number; y: number; simple: boolean } | null>(null)
     // id of the carousel card currently hovered — that card grows to CARD_HOVER_W and pops OVER
     // its neighbours (the layout slot stays put, so nothing else shifts).
@@ -2389,21 +2436,21 @@ export default function ParkMapHoverReveal() {
         : PATHS_FALLBACK
 
     const staticStyleId = CONFIG.mapStyle.replace("mapbox://styles/", "")
-    // Facade framing — ONE fixed render for EVERY screen size (no sm/lg split), so the facade
-    // screenshot never changes with the viewport. Square (1280×1280) + a single zoom keeps it
-    // orientation-neutral; the <img>'s objectFit:cover then crops it to whatever container shape
-    // it lands in — exactly the same center/zoom the live map opens at (see computeHomeView), so
-    // the facade→live swap still doesn't reframe. Centered on the Emerald Necklace.
-    const [staticW, staticH] = [1280, 1280]
-    const staticCenter: [number, number] = [-71.10, 42.31]
-    const staticZoom = 11.9
+    // Facade framing — see FACADE_PRIMARY / FACADE_FALLBACK at module scope for the full
+    // rationale. Once the Static Images request has errored (facadeImgFailed) we switch to the
+    // bundled screenshot AND to its framing, so the projected POI dots keep landing correctly.
+    const facadeFraming = facadeImgFailed ? FACADE_FALLBACK : FACADE_PRIMARY
+    const [staticW, staticH] = [facadeFraming.w, facadeFraming.h]
+    const staticCenter: [number, number] = facadeFraming.center
+    const staticZoom = facadeFraming.zoom
     // Bump STATIC_MAP_REV after re-publishing the Mapbox style in Studio to force the
     // facade to pull a fresh render (busts the Static Images API / browser cache).
     const STATIC_MAP_REV = 3
-    const staticMapUrl =
-        `https://api.mapbox.com/styles/v1/${staticStyleId}/static/` +
-        `${staticCenter[0]},${staticCenter[1]},${staticZoom}/` +
-        `${staticW}x${staticH}@2x?access_token=${CONFIG.mapboxToken}&rev=${STATIC_MAP_REV}`
+    const staticMapUrl = facadeImgFailed
+        ? FACADE_FALLBACK.src
+        : `https://api.mapbox.com/styles/v1/${staticStyleId}/static/` +
+          `${staticCenter[0]},${staticCenter[1]},${staticZoom}/` +
+          `${staticW}x${staticH}@2x?access_token=${CONFIG.mapboxToken}&rev=${STATIC_MAP_REV}`
 
     /* HOME FRAMING (facade ↔ live map alignment): mirror the current static-image framing params
        so computeHomeView() (which the live map uses for init + every reset-to-home) reproduces
@@ -2591,6 +2638,12 @@ export default function ParkMapHoverReveal() {
                 src={staticMapUrl}
                 alt="Map"
                 onClick={() => setMapActive(true)}
+                // Static Images request failed → fall back to the bundled screenshot. Guarded on
+                // the current state so that if the FALLBACK itself 404s this can't re-fire into a
+                // render loop (setState to the same value is a no-op, but the guard makes it explicit).
+                onError={() => {
+                    if (!facadeImgFailed) setFacadeImgFailed(true)
+                }}
                 draggable={false}
                 style={{
                     position: "absolute", inset: 0, width: "100%", height: "100%",

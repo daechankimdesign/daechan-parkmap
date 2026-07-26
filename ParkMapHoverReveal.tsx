@@ -1,4 +1,4 @@
-// ParkMap.tsx
+// ENC_Map_UI.tsx
 
 import { addPropertyControls, ControlType } from "framer"
 import { AnimatePresence, motion } from "framer-motion"
@@ -21,7 +21,7 @@ const CONFIG = {
     minZoom: 3,   // farthest the user can zoom out (no smaller than 3)
     airtableProxy: "https://lively-dawn-3d84.adam-69d.workers.dev",
     // ↓ Change this when the domain changes — all slug links update automatically
-    siteBaseUrl: "https://large-shape-151756.framer.app",
+    siteBaseUrl: "https://honest-discipline-260402.framer.app",
     // ↓ Emerald Necklace tileset — update if re-uploaded
     parkTilesetId: "adamatot.utqyswzwhi90",
     // ↓ Mapbox symbol layer ID for park name labels
